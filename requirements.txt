@@ -4,3 +4,4 @@ urllib3>=2.0,<3
 openpyxl>=3.1,<4
 azure-identity>=1.17,<2
 azure-storage-file-datalake>=12.16,<13
+azure-functions
