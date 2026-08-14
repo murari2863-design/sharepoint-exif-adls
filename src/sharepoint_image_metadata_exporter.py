@@ -23,7 +23,7 @@ import pandas as pd
 import requests
 import urllib3
 
-from azure.identity import AzureCliCredential
+from azure.identity import ClientSecretCredential, ManagedIdentityCredential
 from azure.storage.filedatalake import DataLakeServiceClient
 
 
@@ -175,81 +175,92 @@ HEADERS = [
 
 
 # ============================================================
-# AUTH
+# AUTHENTICATION
 # ============================================================
 
-def find_azure_cli() -> str:
+# Azure Function authentication:
+#
+# 1. User-assigned Managed Identity:
+#       AZURE_CLIENT_ID=<managed identity client/application ID>
+#       No client secret is required.
+#
+# 2. Service principal:
+#       AZURE_TENANT_ID=<tenant ID>
+#       AZURE_CLIENT_ID=<application/client ID>
+#       AZURE_CLIENT_SECRET=<client secret>
+#
+# Azure CLI is intentionally NOT used.
 
-    candidates = [
-        shutil.which("az"),
-        shutil.which("az.cmd"),
+CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "").strip()
+CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET", "").strip()
 
-        r"C:\Program Files\Microsoft SDKs"
-        r"\Azure\CLI2\wbin\az.cmd",
 
-        r"C:\Program Files (x86)\Microsoft SDKs"
-        r"\Azure\CLI2\wbin\az.cmd",
-    ]
+def get_azure_credential():
+    """
+    Return a credential that works in Azure Functions without Azure CLI.
 
-    for candidate in candidates:
+    If AZURE_CLIENT_SECRET is configured, authenticate as a service
+    principal. Otherwise authenticate with the configured user-assigned
+    managed identity.
+    """
+    if CLIENT_SECRET:
+        if not TENANT_ID or not CLIENT_ID:
+            raise RuntimeError(
+                "Service-principal authentication requires "
+                "AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_CLIENT_SECRET."
+            )
 
-        if candidate and Path(candidate).exists():
+        return ClientSecretCredential(
+            tenant_id=TENANT_ID,
+            client_id=CLIENT_ID,
+            client_secret=CLIENT_SECRET,
+        )
 
-            return candidate
+    if CLIENT_ID:
+        return ManagedIdentityCredential(
+            client_id=CLIENT_ID
+        )
 
     raise RuntimeError(
-        "Azure CLI was not found by Python.\n"
-        "Install Azure CLI and make sure the `az` command is "
-        "available in your terminal, then retry."
+        "Azure authentication is not configured. For a user-assigned "
+        "managed identity set AZURE_CLIENT_ID. For a service principal "
+        "set AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_CLIENT_SECRET."
     )
+
+
+AZURE_CREDENTIAL = None
+
+
+def get_azure_credential_singleton():
+    global AZURE_CREDENTIAL
+
+    if AZURE_CREDENTIAL is None:
+        AZURE_CREDENTIAL = get_azure_credential()
+
+    return AZURE_CREDENTIAL
 
 
 def get_graph_token() -> str:
+    credential = get_azure_credential_singleton()
 
-    az_cli = find_azure_cli()
-
-    cmd = [
-        az_cli,
-        "account",
-        "get-access-token",
-        "--tenant",
-        TENANT_ID,
-        "--resource",
-        "https://graph.microsoft.com",
-        "--query",
-        "accessToken",
-        "--output",
-        "tsv",
-    ]
-
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        check=True,
+    token = credential.get_token(
+        "https://graph.microsoft.com/.default"
     )
 
-    token = result.stdout.strip()
-
-    if not token:
-
+    if not token or not token.token:
         raise RuntimeError(
-            "Azure CLI returned an empty "
-            "Microsoft Graph token."
+            "Azure credential returned an empty Microsoft Graph token."
         )
 
-    return token
+    return token.token
 
 
 def make_session() -> requests.Session:
-
     session = requests.Session()
 
     session.headers.update(
         {
-            "Authorization": (
-                f"Bearer {get_graph_token()}"
-            ),
+            "Authorization": f"Bearer {get_graph_token()}",
             "Accept": "application/json",
         }
     )
@@ -257,14 +268,13 @@ def make_session() -> requests.Session:
     session.verify = SSL_VERIFY
 
     if not SSL_VERIFY:
-
         urllib3.disable_warnings(
             urllib3.exceptions.InsecureRequestWarning
         )
 
         print(
             "WARNING: SSL verification is disabled "
-            "because SSL verification is disabled because SSL_VERIFY is false."
+            "because SSL_VERIFY is false."
         )
 
     return session
@@ -1461,7 +1471,7 @@ class AdlsOutputStore:
         self.prefix = prefix.strip("/")
         self.local_cache = Path(local_cache)
         self.local_cache.mkdir(parents=True, exist_ok=True)
-        self.credential = DefaultAzureCredential()
+        self.credential = get_azure_credential_singleton()
         self.service = DataLakeServiceClient(
             account_url=self.account_url,
             credential=self.credential,
@@ -2001,7 +2011,13 @@ def validate_configuration():
     missing = []
     if not SITE_URL:
         missing.append("SHAREPOINT_SITE_URL")
-    if not TENANT_ID:
+    if not TENANT_ID and CLIENT_SECRET:
+        missing.append("AZURE_TENANT_ID")
+
+    if not CLIENT_ID:
+        missing.append("AZURE_CLIENT_ID")
+
+    if CLIENT_SECRET and not TENANT_ID:
         missing.append("AZURE_TENANT_ID")
     if not FOLDER_PATH_IN_LIBRARY:
         missing.append("SHAREPOINT_FOLDER_PATH")
