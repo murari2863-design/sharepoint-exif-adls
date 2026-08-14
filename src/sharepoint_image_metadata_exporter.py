@@ -1461,7 +1461,7 @@ class AdlsOutputStore:
         self.prefix = prefix.strip("/")
         self.local_cache = Path(local_cache)
         self.local_cache.mkdir(parents=True, exist_ok=True)
-        self.credential = AzureCliCredential()
+        self.credential = DefaultAzureCredential()
         self.service = DataLakeServiceClient(
             account_url=self.account_url,
             credential=self.credential,
