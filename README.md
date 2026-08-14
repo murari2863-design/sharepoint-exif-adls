@@ -133,6 +133,8 @@ RESET_CHECKPOINT=true
 CLEAN_OUTPUT_ON_RESET=true
 ```
 
+
+
 This removes the configured Excel, CSV, JSON, debug and checkpoint artifacts from ADLS and starts again. Use this carefully.
 
 ## Configuration
